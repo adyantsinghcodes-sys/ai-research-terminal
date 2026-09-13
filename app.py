@@ -7,6 +7,7 @@ app = typer.Typer()
 @app.command()
 def quote(ticker: str):
     """Get quote for a ticker"""
+    ticker = ticker.upper()
     t = yf.Ticker(f"{ticker}.NS")
     data = t.history(period="2d")
 
