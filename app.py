@@ -33,6 +33,29 @@ def ask(query: str):
     """Ask the AI analyst a question"""
     print(f"ask called with: {query}")
 
+@app.command()
+def fundamentals(ticker: str):
+    """Get fundamentals for a ticker"""
+    ticker = ticker.upper()
+    t = yf.Ticker(f"{ticker}.NS")
+    info = t.info
+
+    if not info or info.get("trailingPE") is None:
+        print(f"No fundamentals data found for {ticker}")
+        return
+
+    pe = info.get("trailingPE")
+    market_cap = info.get("marketCap")
+    roe = info.get("returnOnEquity")
+    de = info.get("debtToEquity")
+
+
+    print(f"{ticker} Fundamentals:")
+    print(f"  P/E Ratio: {pe:.2f}" if pe else "  P/E Ratio: N/A")
+    print(f"  Market Cap: {market_cap:,}" if market_cap else "  Market Cap: N/A")
+    print(f"  ROE: {roe*100:.2f}%" if roe else "  ROE: N/A")
+    print(f"  D/E: {de:.2f}" if de else "  D/E: N/A")
+
 if __name__ == "__main__":
     load_config()
     app()
