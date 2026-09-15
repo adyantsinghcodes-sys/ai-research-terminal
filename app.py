@@ -10,6 +10,12 @@ load_dotenv()
 app = typer.Typer()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+portfolio = [
+    {"ticker": "TCS", "qty": 10},
+    {"ticker": "RELIANCE", "qty": 5},
+    {"ticker": "INFY", "qty": 15},
+]
+
 tools = [
     {
         "type": "function",
@@ -119,8 +125,33 @@ def ask(query: str):
 
 @app.command()
 def exposure():
-    """Show portfolio exposure"""
-    print("exposure called")
+    """Show portfolio exposure and concentration risk"""
+    tickers_ns =[f"{h['ticker']}.NS" for h in portfolio]
+    data = yf.download(tickers_ns, period="6mo")["Close"]
+    latest_prices = data.iloc[-1]
+
+    total_value = 0
+    holdings_value={}
+    for h in portfolio:
+        ticker_ns = f"{h['ticker']}.NS"
+        price = latest_prices[ticker_ns]
+        value = price*h["qty"]
+        holdings_value[h["ticker"]] = value
+        total_value += value
+
+    print("Portfolio Exposure:")
+    for ticker, value in holdings_value.items():
+        weight = (value / total_value) * 100
+        print(f"  {ticker}: ₹{value:,.2f}  ({weight:.1f}% of portfolio)")
+
+    print(f"\nTotal Portfolio Value: ₹{total_value:,.2f}")
+
+    returns = data.pct_change().dropna()
+    correlation = returns.corr()
+    print("\nCorrelation Matrix:")
+    print(correlation.round(2))
+
+
 
 
 @app.command()
