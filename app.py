@@ -5,10 +5,38 @@ from groq import Groq
 from config import load_config
 import yfinance as yf
 from dotenv import load_dotenv
+import numpy as np
 load_dotenv()
 
 app = typer.Typer()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+def compute_live_var(ticker, window=252, target_alpha=0.01, gamma=0.01, alpha_bounds=(0.001, 0.03)):
+    """Live ACI VaR: replays the ACI update rule to get today's adapted VaR"""
+    t = yf.Ticker(f"{ticker}.NS")
+    data = t.history(period="2y")
+    if data.empty or len(data) < window + 30:
+        return {"error": "Not enough data"}
+
+    returns = data["Close"].pct_change().dropna()
+    losses = -returns
+
+    alpha_t = target_alpha
+    for i in range(window, len(losses)):
+        window_losses = losses.iloc[i - window:i]
+        aci_var = np.quantile(window_losses, 1 - alpha_t)
+        err_t = 1 if losses.iloc[i] > aci_var else 0
+        alpha_t = np.clip(alpha_t + gamma * (target_alpha - err_t), *alpha_bounds)
+
+    final_window = losses.iloc[-window:]
+    current_var = np.quantile(final_window, 1 - alpha_t)
+
+    return {
+        "ticker": ticker.upper(),
+        "var_99_1day": round(current_var * 100, 2),
+        "adapted_alpha": round(alpha_t, 4),
+        "target_alpha": target_alpha,
+        "interpretation": f"On 99% of days, expect not to lose more than {round(current_var*100, 2)}% in a day"
+    }
 
 portfolio = [
     {"ticker": "TCS", "qty": 10},
@@ -176,6 +204,17 @@ def fundamentals(ticker: str):
     print(f"  ROE: {roe*100:.2f}%" if roe else "  ROE: N/A")
     print(f"  D/E: {de:.2f}" if de else "  D/E: N/A")
 
+@app.command()
+def var(ticker: str):
+    """Get adaptive VaR estimate for a ticker"""
+    ticker = ticker.upper()
+    result = compute_live_var(ticker)
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        return
+    print(f"{ticker} — 1-Day VaR (99%): {result['var_99_1day']}%")
+    print(f"Adapted alpha: {result['adapted_alpha']} (target: {result['target_alpha']})")
+    print(result["interpretation"])
 
 if __name__ == "__main__":
     load_config()
