@@ -10,6 +10,7 @@ load_dotenv()
 
 app = typer.Typer()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
 def compute_live_var(ticker, window=252, target_alpha=0.01, gamma=0.01, alpha_bounds=(0.001, 0.03)):
     """Live ACI VaR: replays the ACI update rule to get today's adapted VaR"""
     t = yf.Ticker(f"{ticker}.NS")
@@ -72,7 +73,21 @@ tools = [
                 "required": ["ticker"]
             }
         }
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "get_var",
+        "description": "Get the adaptive 1-day Value at Risk (VaR) estimate at 99% confidence for a ticker",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS"}
+            },
+            "required": ["ticker"]
+        }
     }
+}
 ]
 
 
@@ -101,7 +116,10 @@ def run_tool(name, args):
             "roe": info.get("returnOnEquity"),
             "de": info.get("debtToEquity")
         }
+    elif name == "get_var":
+        return compute_live_var(args["ticker"].upper())
     return {"error": "Unknown tool"}
+
 
 @app.command()
 def quote(ticker: str):
@@ -124,6 +142,7 @@ def quote(ticker: str):
 @app.command()
 def ask(query: str):
     """Ask the AI analyst a question"""
+    messgaes = [{"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly."}]
     messages = [{"role": "user", "content": query}]
 
     while True:
