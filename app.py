@@ -142,8 +142,10 @@ def quote(ticker: str):
 @app.command()
 def ask(query: str):
     """Ask the AI analyst a question"""
-    messgaes = [{"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly."}]
-    messages = [{"role": "user", "content": query}]
+    messages = [
+        {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly."},
+    {"role": "user", "content": query}
+    ]
 
     while True:
         response = groq_client.chat.completions.create(
