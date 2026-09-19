@@ -46,6 +46,7 @@ portfolio = [
 ]
 
 tools = [
+    
     {
         "type": "function",
         "function": {
@@ -87,7 +88,21 @@ tools = [
             "required": ["ticker"]
         }
     }
+    },
+   {
+    "type": "function",
+    "function": {
+        "name": "get_exposure",
+        "description": "Get portfolio weight breakdown and correlation matrix across holdings",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
 }
+
+
 ]
 
 
@@ -118,7 +133,35 @@ def run_tool(name, args):
         }
     elif name == "get_var":
         return compute_live_var(args["ticker"].upper())
-    return {"error": "Unknown tool"}
+        return {"error": "Unknown tool"}
+    
+    
+    elif name == "get_exposure":
+        tickers_ns = [f"{h['ticker']}.NS" for h in portfolio]
+        data = yf.download(tickers_ns, period="6mo")["Close"]
+        latest_prices = data.iloc[-1]
+    
+        total_value = 0
+        holdings = {}
+        for h in portfolio:
+            ticker_ns = f"{h['ticker']}.NS"
+            price = latest_prices[ticker_ns]
+            value = price * h["qty"]
+            holdings[h["ticker"]] = round(value, 2)
+            total_value += value
+    
+        weights = {t: round((v / total_value) * 100, 1) for t, v in holdings.items()}
+        correlation = data.pct_change().dropna().corr().round(2).to_dict()
+    
+        return {
+            "holdings_value": holdings,
+            "weights_pct": weights,
+            "total_value": round(total_value, 2),
+            "correlation_matrix": correlation
+        }
+    
+ 
+
 
 
 @app.command()
