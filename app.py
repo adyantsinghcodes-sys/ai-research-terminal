@@ -133,7 +133,7 @@ def run_tool(name, args):
         }
     elif name == "get_var":
         return compute_live_var(args["ticker"].upper())
-        return {"error": "Unknown tool"}
+        
     
     
     elif name == "get_exposure":
@@ -159,6 +159,7 @@ def run_tool(name, args):
             "total_value": round(total_value, 2),
             "correlation_matrix": correlation
         }
+    return {"error": "Unknown tool"}
     
  
 
@@ -181,6 +182,47 @@ def quote(ticker: str):
     pct_change = (change / previous) * 100
 
     print(f"{ticker}: {latest:.2f}  ({change:+.2f}, {pct_change:+.2f}%)")
+
+@app.command()
+def chat():
+    """Start an interactive research session with the AI analyst"""
+    messages = [
+    {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' claims unless a tool explicitly returned "
+    "them — even when reasoning about a number a tool did return."}]
+    print("Chat session started. Type 'exit' to quit.\n")
+
+    while True:
+        user_input = input("> ")
+        if user_input.strip().lower() in ("exit", "quit"):
+            print("Session ended.")
+            break
+
+        messages.append({"role": "user", "content": user_input})
+
+        while True:
+            response = groq_client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto"
+            )
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                print(message.content + "\n")
+                messages.append({"role": "assistant", "content": message.content})
+                break
+
+            messages.append(message)
+            for tool_call in message.tool_calls:
+                args = json.loads(tool_call.function.arguments)
+                result = run_tool(tool_call.function.name, args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result)
+                })
+
 
 @app.command()
 def ask(query: str):
