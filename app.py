@@ -11,9 +11,30 @@ load_dotenv()
 app = typer.Typer()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-def compute_live_var(ticker, window=252, target_alpha=0.01, gamma=0.01, alpha_bounds=(0.001, 0.03)):
+
+current_market = "IN"
+
+
+def resolve_ticker(ticker: str, market: str = "IN") -> str:
+    """
+    Resolve a bare ticker to the correct yfinance symbol.
+    If the user already included an exchange suffix (a "." in the ticker),
+    use it as-is. Otherwise, append .NS for India, or leave bare for US
+    (yfinance takes US tickers with no suffix).
+    """
+    ticker = ticker.upper()
+    if "." in ticker:
+        return ticker
+    if market.upper() == "US":
+        return ticker
+    return f"{ticker}.NS"
+
+
+def compute_live_var(ticker, market="IN", window=252, target_alpha=0.01, gamma=0.01, alpha_bounds=(0.001, 0.03)):
     """Live ACI VaR: replays the ACI update rule to get today's adapted VaR"""
-    t = yf.Ticker(f"{ticker}.NS")
+    display_ticker = ticker.upper()
+    resolved = resolve_ticker(ticker, market)
+    t = yf.Ticker(resolved)
     data = t.history(period="2y")
     if data.empty or len(data) < window + 30:
         return {"error": "Not enough data"}
@@ -32,12 +53,13 @@ def compute_live_var(ticker, window=252, target_alpha=0.01, gamma=0.01, alpha_bo
     current_var = np.quantile(final_window, 1 - alpha_t)
 
     return {
-        "ticker": ticker.upper(),
+        "ticker": display_ticker,
         "var_99_1day": round(current_var * 100, 2),
         "adapted_alpha": round(alpha_t, 4),
         "target_alpha": target_alpha,
         "interpretation": f"On 99% of days, expect not to lose more than {round(current_var*100, 2)}% in a day"
     }
+
 
 portfolio = [
     {"ticker": "TCS", "qty": 10},
@@ -46,7 +68,6 @@ portfolio = [
 ]
 
 tools = [
-    
     {
         "type": "function",
         "function": {
@@ -55,7 +76,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS"}
+                    "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS or AAPL"}
                 },
                 "required": ["ticker"]
             }
@@ -69,78 +90,77 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS"}
+                    "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS or AAPL"}
                 },
                 "required": ["ticker"]
             }
         }
     },
     {
-    "type": "function",
-    "function": {
-        "name": "get_var",
-        "description": "Get the adaptive 1-day Value at Risk (VaR) estimate at 99% confidence for a ticker",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS"}
-            },
-            "required": ["ticker"]
+        "type": "function",
+        "function": {
+            "name": "get_var",
+            "description": "Get the adaptive 1-day Value at Risk (VaR) estimate at 99% confidence for a ticker",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TCS or AAPL"}
+                },
+                "required": ["ticker"]
+            }
         }
-    }
     },
-   {
-    "type": "function",
-    "function": {
-        "name": "get_exposure",
-        "description": "Get portfolio weight breakdown and correlation matrix across holdings",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
+    {
+        "type": "function",
+        "function": {
+            "name": "get_exposure",
+            "description": "Get portfolio weight breakdown and correlation matrix across holdings",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         }
     }
-}
-
-
 ]
 
 
 def run_tool(name, args):
-    """Executes the real function based on what the model requested"""
+    """Executes the real function based on what the model requested.
+    Uses the module-level current_market, set by chat() at session start
+    (defaults to India for ask(), which has no market prompt)."""
     if name == "get_quote":
-        t = yf.Ticker(f"{args['ticker'].upper()}.NS")
+        display_ticker = args["ticker"].upper()
+        t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
         data = t.history(period="5d")
         if data.empty or len(data) < 2:
             return {"error": "Not enough data found"}
         latest = data["Close"].iloc[-1]
         previous = data["Close"].iloc[-2]
         return {
-            "ticker": args["ticker"].upper(),
+            "ticker": display_ticker,
             "price": round(latest, 2),
             "change": round(latest - previous, 2),
             "pct_change": round((latest - previous) / previous * 100, 2)
         }
     elif name == "get_fundamentals":
-        t = yf.Ticker(f"{args['ticker'].upper()}.NS")
+        display_ticker = args["ticker"].upper()
+        t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
         info = t.info
         return {
-            "ticker": args["ticker"].upper(),
+            "ticker": display_ticker,
             "pe": info.get("trailingPE"),
             "market_cap": info.get("marketCap"),
             "roe": info.get("returnOnEquity"),
             "de": info.get("debtToEquity")
         }
     elif name == "get_var":
-        return compute_live_var(args["ticker"].upper())
-        
-    
-    
+        return compute_live_var(args["ticker"], current_market)
     elif name == "get_exposure":
         tickers_ns = [f"{h['ticker']}.NS" for h in portfolio]
         data = yf.download(tickers_ns, period="6mo")["Close"]
         latest_prices = data.iloc[-1]
-    
+
         total_value = 0
         holdings = {}
         for h in portfolio:
@@ -149,10 +169,10 @@ def run_tool(name, args):
             value = price * h["qty"]
             holdings[h["ticker"]] = round(value, 2)
             total_value += value
-    
+
         weights = {t: round((v / total_value) * 100, 1) for t, v in holdings.items()}
         correlation = data.pct_change().dropna().corr().round(2).to_dict()
-    
+
         return {
             "holdings_value": holdings,
             "weights_pct": weights,
@@ -160,20 +180,17 @@ def run_tool(name, args):
             "correlation_matrix": correlation
         }
     return {"error": "Unknown tool"}
-    
- 
-
 
 
 @app.command()
-def quote(ticker: str):
+def quote(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get quote for a ticker"""
-    ticker = ticker.upper()
-    t = yf.Ticker(f"{ticker}.NS")
+    display_ticker = ticker.upper()
+    t = yf.Ticker(resolve_ticker(ticker, market))
     data = t.history(period="5d")
 
     if data.empty or len(data) < 2:
-        print(f"No data found for {ticker}")
+        print(f"No data found for {display_ticker}")
         return
 
     latest = data["Close"].iloc[-1]
@@ -181,14 +198,24 @@ def quote(ticker: str):
     change = latest - previous
     pct_change = (change / previous) * 100
 
-    print(f"{ticker}: {latest:.2f}  ({change:+.2f}, {pct_change:+.2f}%)")
+    print(f"{display_ticker}: {latest:.2f}  ({change:+.2f}, {pct_change:+.2f}%)")
+
 
 @app.command()
 def chat():
     """Start an interactive research session with the AI analyst"""
+    global current_market
+
+    print("Which market are you researching?")
+    print("  [1] India (NSE)")
+    print("  [2] United States")
+    choice = input("> ").strip()
+    current_market = "US" if choice == "2" else "IN"
+    print(f"Market set to {'United States' if current_market == 'US' else 'India (NSE)'}.\n")
+
     messages = [
-    {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' claims unless a tool explicitly returned "
-    "them — even when reasoning about a number a tool did return."}]
+        {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' claims unless a tool explicitly returned them — even when reasoning about a number a tool did return."}
+    ]
     print("Chat session started. Type 'exit' to quit.\n")
 
     while True:
@@ -226,10 +253,10 @@ def chat():
 
 @app.command()
 def ask(query: str):
-    """Ask the AI analyst a question"""
+    """Ask the AI analyst a question. Defaults to India (NSE) — use chat() for US market questions."""
     messages = [
         {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly."},
-    {"role": "user", "content": query}
+        {"role": "user", "content": query}
     ]
 
     while True:
@@ -260,16 +287,16 @@ def ask(query: str):
 @app.command()
 def exposure():
     """Show portfolio exposure and concentration risk"""
-    tickers_ns =[f"{h['ticker']}.NS" for h in portfolio]
+    tickers_ns = [f"{h['ticker']}.NS" for h in portfolio]
     data = yf.download(tickers_ns, period="6mo")["Close"]
     latest_prices = data.iloc[-1]
 
     total_value = 0
-    holdings_value={}
+    holdings_value = {}
     for h in portfolio:
         ticker_ns = f"{h['ticker']}.NS"
         price = latest_prices[ticker_ns]
-        value = price*h["qty"]
+        value = price * h["qty"]
         holdings_value[h["ticker"]] = value
         total_value += value
 
@@ -286,17 +313,15 @@ def exposure():
     print(correlation.round(2))
 
 
-
-
 @app.command()
-def fundamentals(ticker: str):
+def fundamentals(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get fundamentals for a ticker"""
-    ticker = ticker.upper()
-    t = yf.Ticker(f"{ticker}.NS")
+    display_ticker = ticker.upper()
+    t = yf.Ticker(resolve_ticker(ticker, market))
     info = t.info
 
     if not info or info.get("trailingPE") is None:
-        print(f"No fundamentals data found for {ticker}")
+        print(f"No fundamentals data found for {display_ticker}")
         return
 
     pe = info.get("trailingPE")
@@ -304,23 +329,24 @@ def fundamentals(ticker: str):
     roe = info.get("returnOnEquity")
     de = info.get("debtToEquity")
 
-    print(f"{ticker} Fundamentals:")
+    print(f"{display_ticker} Fundamentals:")
     print(f"  P/E Ratio: {pe:.2f}" if pe else "  P/E Ratio: N/A")
     print(f"  Market Cap: {market_cap:,}" if market_cap else "  Market Cap: N/A")
     print(f"  ROE: {roe*100:.2f}%" if roe else "  ROE: N/A")
     print(f"  D/E: {de:.2f}" if de else "  D/E: N/A")
 
+
 @app.command()
-def var(ticker: str):
+def var(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get adaptive VaR estimate for a ticker"""
-    ticker = ticker.upper()
-    result = compute_live_var(ticker)
+    result = compute_live_var(ticker, market)
     if "error" in result:
         print(f"Error: {result['error']}")
         return
-    print(f"{ticker} — 1-Day VaR (99%): {result['var_99_1day']}%")
+    print(f"{result['ticker']} — 1-Day VaR (99%): {result['var_99_1day']}%")
     print(f"Adapted alpha: {result['adapted_alpha']} (target: {result['target_alpha']})")
     print(result["interpretation"])
+
 
 if __name__ == "__main__":
     load_config()
