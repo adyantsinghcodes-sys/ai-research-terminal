@@ -67,6 +67,16 @@ portfolio = [
     {"ticker": "INFY", "qty": 15},
 ]
 
+# [CHANGE 1] Single shared system prompt + tool-round cap
+SYSTEM_PROMPT = (
+    "You are a financial data assistant. Only state numbers that come from tool results. "
+    "Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) "
+    "that wasn't explicitly returned by a tool. If asked for something not covered by your tools, "
+    "say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' "
+    "claims unless a tool explicitly returned them — even when reasoning about a number a tool did return."
+)
+MAX_ROUNDS = 6
+
 tools = [
     {
         "type": "function",
@@ -182,6 +192,16 @@ def run_tool(name, args):
     return {"error": "Unknown tool"}
 
 
+# [CHANGE 2] Wrapper so bad JSON / yfinance failures return an error dict instead of crashing
+def safe_run_tool(name, args_json):
+    """Wraps run_tool so bad JSON or a yfinance failure returns an error dict
+    to the model instead of crashing the session."""
+    try:
+        return run_tool(name, json.loads(args_json))
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 @app.command()
 def quote(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get quote for a ticker"""
@@ -214,7 +234,7 @@ def chat():
     print(f"Market set to {'United States' if current_market == 'US' else 'India (NSE)'}.\n")
 
     messages = [
-        {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' claims unless a tool explicitly returned them — even when reasoning about a number a tool did return."}
+        {"role": "system", "content": SYSTEM_PROMPT}  # [CHANGE 1]
     ]
     print("Chat session started. Type 'exit' to quit.\n")
 
@@ -226,7 +246,7 @@ def chat():
 
         messages.append({"role": "user", "content": user_input})
 
-        while True:
+        for _ in range(MAX_ROUNDS):  # [CHANGE 3] was: while True
             response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=messages,
@@ -242,24 +262,26 @@ def chat():
 
             messages.append(message)
             for tool_call in message.tool_calls:
-                args = json.loads(tool_call.function.arguments)
-                result = run_tool(tool_call.function.name, args)
+                # [CHANGE 2] was: json.loads + run_tool
+                result = safe_run_tool(tool_call.function.name, tool_call.function.arguments)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result)
                 })
+        else:  # [CHANGE 3] runs only if the loop hit MAX_ROUNDS without break
+            print("Stopped: too many tool rounds without a final answer.\n")
 
 
 @app.command()
 def ask(query: str):
     """Ask the AI analyst a question. Defaults to India (NSE) — use chat() for US market questions."""
     messages = [
-        {"role": "system", "content": "You are a financial data assistant. Only state numbers that come from tool results. Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) that wasn't explicitly returned by a tool. If asked for something not covered by your tools, say so clearly."},
+        {"role": "system", "content": SYSTEM_PROMPT},  # [CHANGE 1] ask() now gets the full prompt
         {"role": "user", "content": query}
     ]
 
-    while True:
+    for _ in range(MAX_ROUNDS):  # [CHANGE 3] was: while True
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=messages,
@@ -275,13 +297,15 @@ def ask(query: str):
         messages.append(message)
 
         for tool_call in message.tool_calls:
-            args = json.loads(tool_call.function.arguments)
-            result = run_tool(tool_call.function.name, args)
+            # [CHANGE 2] was: json.loads + run_tool
+            result = safe_run_tool(tool_call.function.name, tool_call.function.arguments)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": json.dumps(result)
             })
+
+    print("Stopped: too many tool rounds without a final answer.")  # [CHANGE 3]
 
 
 @app.command()
