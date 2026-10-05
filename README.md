@@ -61,6 +61,7 @@ Final grounded answer
 
 Because the quantile level reacts to recent breaches, the estimate tightens faster after a run of large losses than a fixed-quantile historical VaR would. It is still reactive: it adjusts after breaches, it does not anticipate them.
 
+Full research pipeline, backtests and results: [aci-var-research](https://github.com/adyantsinghcodes-sys/aci-var-research).
 
 **Known limitation:** the ACI parameters (`gamma`, `alpha_bounds`) were tuned on index data (NIFTY / S&P 500), not individual stocks. Applying them to single tickers has not been separately validated.
 
