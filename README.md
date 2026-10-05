@@ -1,26 +1,40 @@
 # AI Research Terminal
 
-A command-line financial-research terminal that combines real-time market data with an AI agent layer coupled to adaptive risk modelling. This project was built to make quantitative finance research (ACI for VaR) into something actually usable, not just a backtest script.
+A command-line financial-research terminal that combines market data with an AI agent layer and adaptive risk modelling. Built to make one piece of quantitative finance research (Adaptive Conformal Inference for VaR) usable as a tool, not just a backtest script.
 
 ## What It Does
 
-Instead of a typical financial dashboard with charts, news, and other data, this simplifies that into a shell-based terminal where the user can run specific commands or ask questions in plain English, and an AI agent decides which tool to call and grounds its answer in real data.
+Instead of a dashboard full of charts and news, this is a shell-based terminal: run specific commands, or ask questions in plain English and let an AI agent pick the right tool and ground its answer in the data that tool returns.
+
+Supports India (NSE, default) and US markets.
 
 ```bash
 python app.py quote TCS
+python app.py quote AAPL --market US
 python app.py fundamentals TCS
 python app.py var TCS
-python app.py exposure
+python app.py exposure --market US
 python app.py ask "what's the risk on TCS right now"
+python app.py ask "how is NVDA doing today" --market US
+python app.py chat
 ```
 
-## Features of the Tool
+## Commands
 
-- **`quote`** — live price and day-change for any NSE-listed stock (via yfinance)
-- **`fundamentals`** — P/E, Market Cap, ROE, D/E for a ticker
-- **`var`** — a live, adaptive 1-day Value at Risk estimate using **Adaptive Conformal Inference (ACI)**, based on the Gibbs & Candès (2021) update rule. Unlike a fixed-alpha historical VaR, this recalibrates its own confidence level every day based on recent breach history — so it widens automatically during volatile regimes (e.g. it responds visibly during the 2020 crash in backtests) instead of lagging behind a static threshold.
-- **`exposure`** — portfolio weight breakdown plus a correlation matrix, surfacing concentration risk not obvious from sector labels alone (mock portfolio for now — CLI-only, not yet wired into `ask`)
-- **`ask`** — natural-language interface. An LLM (via Groq) is given the above as callable tools, decides which is the most appropriate based on the user's question, and prints an output based strictly on the numbers returned by the tools (the LLM is **constrained** via a system prompt to prevent it from inventing numbers).
+- **`quote`** — latest price and day change for a ticker (via yfinance; prices may be delayed).
+- **`fundamentals`** — P/E, market cap, ROE, D/E.
+- **`var`** — adaptive 1-day Value at Risk using **Adaptive Conformal Inference (ACI)** (Gibbs & Candès, 2021). See [The VaR Model](#the-var-model).
+- **`exposure`** — portfolio weights, total value and a correlation matrix for a **mocked** demo portfolio (separate IN and US portfolios). Returns an error if any holding fails to download, rather than reporting NaN values.
+- **`ask`** — one-shot natural-language query. An LLM (Groq, `openai/gpt-oss-120b`) gets the tools above, chooses which to call, and answers using only numbers the tools returned.
+- **`chat`** — the same agent as a multi-turn session with conversation memory; asks which market you are researching at the start.
+
+All commands except `chat` take `--market IN` (default) or `--market US`.
+
+Ticker handling: bare tickers get `.NS` in India mode and stay bare in US mode. Explicit `.NS` / `.BO` suffixes are kept. In US mode, share classes like `BRK.B` are converted to yfinance's `BRK-B`.
+
+## Grounding the LLM
+
+The system prompt restricts the model to numbers returned by tools: no estimated figures, no industry benchmarks or "typical ranges" unless a tool returned them. This was added after the model invented sector benchmarks in testing.
 
 ## Architecture
 
@@ -38,9 +52,17 @@ Final grounded answer
 
 ## The VaR Model
 
-The `var` command is a live version of a research pipeline built separately (GARCH volatility modelling, Kupiec POF and Christoffersen independence backtesting, and Adaptive Conformal Inference — validated first on synthetic data, then on ^NSEI and ^GSPC historical data). `var` replays the ACI update rule over a trailing window to arrive at today's adapted confidence level, then reports the corresponding VaR.
+`var` is a **rolling empirical VaR with ACI-adapted coverage**. There is no GARCH in this command:
 
-**Known limitation:** the ACI parameters (`gamma`, `alpha_bounds`) were tuned on index-level data (NIFTY/S&P), not individual stocks — applying them to single tickers is a reasonable extension but hasn't been separately validated.
+1. Take two years of daily returns and treat losses as negative returns.
+2. Estimate VaR as the empirical quantile of the trailing 252 days of losses.
+3. Replay the ACI update over the history: after each day, the quantile level is nudged up if that day breached the VaR and down if it did not, targeting 99% long-run coverage.
+4. Report today's VaR at the adapted quantile level.
+
+Because the quantile level reacts to recent breaches, the estimate tightens faster after a run of large losses than a fixed-quantile historical VaR would. It is still reactive: it adjusts after breaches, it does not anticipate them.
+
+
+**Known limitation:** the ACI parameters (`gamma`, `alpha_bounds`) were tuned on index data (NIFTY / S&P 500), not individual stocks. Applying them to single tickers has not been separately validated.
 
 ## Setup
 
@@ -55,21 +77,29 @@ GROQ_API_KEY=your_key_here
 KITE_API_KEY=      # optional, not yet used — for future real portfolio integration
 ```
 
+## Running Tests
+
+```bash
+pytest
+```
+
+The suite runs **fully offline** in a few seconds. yfinance and the Groq client are replaced in every test by an autouse fixture, and any unmocked network call fails the test. No API keys are needed to run the tests.
+
 ## Tech Stack
 
 - **Python**, **Typer** (CLI)
 - **yfinance** — market data
-- **pandas / numpy** — data processing, correlation, VaR calculation
+- **pandas / numpy** — data processing, correlation, VaR
 - **Groq** (`openai/gpt-oss-120b`) — tool-calling LLM layer
+- **pytest** — offline test suite
 
 ## Roadmap
 
-- [ ] Session memory in `ask` (multi-turn follow-ups)
-- [ ] Real portfolio holdings via Kite Connect (currently uses a mock portfolio)
-- [ ] Wire `exposure` into `ask` as a callable tool
+- [ ] Real portfolio holdings via Kite Connect (currently mocked)
+- [ ] Validate ACI parameters on individual stocks (realised breach rates vs. 99% target)
 - [ ] News feed tool
 - [ ] Caching for repeated VaR calls
 
 ## Status
 
-Built incrementally as a learning project — Python, pandas, and applied LLM tool-calling — alongside coursework. Exposure/portfolio data currently uses mock holdings; `quote`, `fundamentals`, and `var` are all live. Real brokerage integration is a planned next step.
+Built incrementally as a learning project in Python, pandas and applied LLM tool-calling, alongside coursework. `quote`, `fundamentals` and `var` use live yfinance data; `exposure` uses mocked holdings until brokerage integration is added.
