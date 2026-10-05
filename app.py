@@ -51,13 +51,15 @@ def compute_live_var(ticker, market="IN", window=252, target_alpha=0.01, gamma=0
 
     final_window = losses.iloc[-window:]
     current_var = np.quantile(final_window, 1 - alpha_t)
+    level = round((1 - alpha_t) * 100, 2)
 
     return {
         "ticker": display_ticker,
-        "var_99_1day": round(current_var * 100, 2),
+        "var_1day_pct": round(current_var * 100, 2),
+        "quantile_level_pct": level,
         "adapted_alpha": round(alpha_t, 4),
         "target_alpha": target_alpha,
-        "interpretation": f"On 99% of days, expect not to lose more than {round(current_var*100, 2)}% in a day"
+        "interpretation": f"1-day loss threshold at the ACI-adapted {level}% quantile (long run coverage target: 99%)",
     }
 
 
@@ -96,7 +98,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_fundamentals",
-            "description": "Get P/E, market cap, ROE, and D/E for a ticker",
+            "description": "Get P/E, market cap, ROE (as a percent), and D/E for a ticker",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -110,7 +112,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_var",
-            "description": "Get the adaptive 1-day Value at Risk (VaR) estimate at 99% confidence for a ticker",
+            "description": "Get the 1-day Value at Risk (VaR) estimate at an ACI-adapted quantile level (long-run coverage target 99%) for a ticker",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -157,12 +159,14 @@ def run_tool(name, args):
         display_ticker = args["ticker"].upper()
         t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
         info = t.info
+        roe = info.get("returnOnEquity")
+        de = info.get("debtToEquity")
         return {
             "ticker": display_ticker,
             "pe": info.get("trailingPE"),
             "market_cap": info.get("marketCap"),
-            "roe": info.get("returnOnEquity"),
-            "de": info.get("debtToEquity")
+            "roe_pct": round(roe * 100, 2) if roe is not None else None,
+            "de_ratio": round(de/100 ,2) if de is not None else None
         }
     elif name == "get_var":
         return compute_live_var(args["ticker"], current_market)
@@ -192,7 +196,6 @@ def run_tool(name, args):
     return {"error": "Unknown tool"}
 
 
-# [CHANGE 2] Wrapper so bad JSON / yfinance failures return an error dict instead of crashing
 def safe_run_tool(name, args_json):
     """Wraps run_tool so bad JSON or a yfinance failure returns an error dict
     to the model instead of crashing the session."""
@@ -354,10 +357,10 @@ def fundamentals(ticker: str, market: str = typer.Option("IN", help="IN for Indi
     de = info.get("debtToEquity")
 
     print(f"{display_ticker} Fundamentals:")
-    print(f"  P/E Ratio: {pe:.2f}" if pe else "  P/E Ratio: N/A")
-    print(f"  Market Cap: {market_cap:,}" if market_cap else "  Market Cap: N/A")
-    print(f"  ROE: {roe*100:.2f}%" if roe else "  ROE: N/A")
-    print(f"  D/E: {de:.2f}" if de else "  D/E: N/A")
+    print(f"  P/E Ratio: {pe:.2f}" if pe is not None else "  P/E Ratio: N/A")
+    print(f"  Market Cap: {market_cap:,}" if market_cap is not None else "  Market Cap: N/A")
+    print(f"  ROE: {roe*100:.2f}%" if roe is not None else "  ROE: N/A")
+    print(f"  D/E: {de/100:.2f}" if de is not None else "  D/E: N/A")
 
 
 @app.command()
@@ -367,7 +370,7 @@ def var(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) o
     if "error" in result:
         print(f"Error: {result['error']}")
         return
-    print(f"{result['ticker']} — 1-Day VaR (99%): {result['var_99_1day']}%")
+    print(f"{result['ticker']} — 1-Day VaR ({result['quantile_level_pct']}% adapted quantile): {result['var_1day_pct']}%")
     print(f"Adapted alpha: {result['adapted_alpha']} (target: {result['target_alpha']})")
     print(result["interpretation"])
 
