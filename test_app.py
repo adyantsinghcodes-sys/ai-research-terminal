@@ -6,6 +6,8 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 import numpy as np
 import pandas as pd
 import pytest
+from types import SimpleNamespace
+from typer.testing import CliRunner
 
 import app
 
@@ -38,6 +40,7 @@ def block_network(monkeypatch):
 
     monkeypatch.setattr(app.yf, "Ticker", _no_network)
     monkeypatch.setattr(app.yf, "download", _no_network)
+    monkeypatch.setattr(app, "groq_client", SimpleNamespace(chat=None))
     monkeypatch.setattr(app, "current_market", "IN")
 
 
@@ -78,7 +81,7 @@ def test_safe_run_tool_unknown_tool():
     ("MSFT", "us", "MSFT"),
     ("tcs.bo", "IN", "TCS.BO"),
     ("INFY.NS", "US", "INFY.NS"),
-    ("brk.b", "US", "BRK.B"),
+    ("brk.b", "US", "BRK-B"),
 ])
 def test_resolve_ticker(ticker, market, expected):
     assert app.resolve_ticker(ticker, market) == expected
@@ -111,6 +114,7 @@ def test_compute_live_var_key_names(monkeypatch):
     ]
     assert result["ticker"] == "TCS"
     assert result["target_alpha"] == 0.01
+    assert "99%" in result["interpretation"]
 
 
 def test_compute_live_var_not_enough_data(monkeypatch):
@@ -167,7 +171,7 @@ def test_var_cli_reads_compute_live_var_keys(monkeypatch):
     fake_result = {
         "ticker": "TCS",
         "var_1day_pct": 2.31,
-        "quantile_level_pct": 1.2,
+        "quantile_level_pct": 98.8,
         "adapted_alpha": 0.012,
         "target_alpha": 0.01,
         "interpretation": "Test interpretation.",
@@ -181,3 +185,75 @@ def test_var_cli_reads_compute_live_var_keys(monkeypatch):
     assert "TCS" in result.output
     assert "2.31%" in result.output
     assert "Test interpretation." in result.output
+
+
+# ---------- get_exposure ----------
+
+def make_close_frame(symbols, rows=130, seed=1):
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2025-01-01", periods=rows, freq="B")
+    return pd.DataFrame({s: 100 * np.cumprod(1 + rng.normal(0, 0.01, rows)) for s in symbols}, index=index)
+
+
+def fake_download_recorder(requested):
+    def fake_download(tickers, period=None):
+        requested.append(list(tickers))
+        return {"Close": make_close_frame(tickers)}
+    return fake_download
+
+
+@pytest.mark.parametrize("market, expected_symbols, currency", [
+    ("IN", ["TCS.NS", "RELIANCE.NS", "INFY.NS"], "INR"),
+    ("US", ["AAPL", "MSFT", "NVDA"], "USD"),
+])
+def test_get_exposure_tool_follows_current_market(monkeypatch, market, expected_symbols, currency):
+    requested = []
+    monkeypatch.setattr(app.yf, "download", fake_download_recorder(requested))
+    monkeypatch.setattr(app, "current_market", market)
+
+    result = app.safe_run_tool("get_exposure", "{}")
+
+    assert "error" not in result, result
+    assert requested == [expected_symbols]
+    assert result["currency"] == currency
+    assert abs(sum(result["weights_pct"].values()) - 100) < 0.5
+
+
+def test_exposure_cli_us_market(monkeypatch):
+    requested = []
+    monkeypatch.setattr(app.yf, "download", fake_download_recorder(requested))
+
+    result = CliRunner().invoke(app.app, ["exposure", "--market", "US"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert requested == [["AAPL", "MSFT", "NVDA"]]
+    assert "USD" in result.output and "INR" not in result.output
+
+
+# ---------- ask ----------
+
+def test_ask_market_option_sets_market_and_tells_model(monkeypatch):
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    monkeypatch.setattr(app, "groq_client", fake_client)
+
+    result = CliRunner().invoke(app.app, ["ask", "AAPL price", "--market", "US"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert app.current_market == "US"
+    assert "United States" in captured["messages"][0]["content"]
+
+def test_get_exposure_reports_failed_download(monkeypatch):
+    def fake_download(tickers, period=None):
+        frame = make_close_frame(tickers)
+        frame["MSFT"] = np.nan
+        return {"Close": frame}
+
+    monkeypatch.setattr(app.yf, "download", fake_download)
+    assert app.get_exposure("US") == {"error": "No price data for: MSFT"}

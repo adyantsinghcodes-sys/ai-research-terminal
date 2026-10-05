@@ -6,6 +6,7 @@ from config import load_config
 import yfinance as yf
 from dotenv import load_dotenv
 import numpy as np
+import pandas as pd
 load_dotenv()
 
 app = typer.Typer()
@@ -15,16 +16,21 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 current_market = "IN"
 
 
+EXCHANGE_SUFFIXES = {"NS", "BO"}
+
+
 def resolve_ticker(ticker: str, market: str = "IN") -> str:
     """
     Resolve a bare ticker to the correct yfinance symbol.
-    If the user already included an exchange suffix (a "." in the ticker),
-    use it as-is. Otherwise, append .NS for India, or leave bare for US
-    (yfinance takes US tickers with no suffix).
+    Known exchange suffixes (.NS, .BO) are kept as-is. In US mode, any other
+    "." is a share class and becomes "-" (BRK.B -> BRK-B, as yfinance expects).
+    Otherwise, append .NS for India, or leave bare for US.
     """
     ticker = ticker.upper()
     if "." in ticker:
-        return ticker
+        if ticker.rsplit(".", 1)[1] in EXCHANGE_SUFFIXES:
+            return ticker
+        return ticker.replace(".", "-") if market.upper() == "US" else ticker
     if market.upper() == "US":
         return ticker
     return f"{ticker}.NS"
@@ -59,15 +65,48 @@ def compute_live_var(ticker, market="IN", window=252, target_alpha=0.01, gamma=0
         "quantile_level_pct": level,
         "adapted_alpha": round(alpha_t, 4),
         "target_alpha": target_alpha,
-        "interpretation": f"1-day loss threshold at the ACI-adapted {level}% quantile (long run coverage target: 99%)",
+        "interpretation": f"1-day loss threshold at the ACI-adapted {level}% quantile (long run coverage target: {(1 - target_alpha) * 100:g}%)",
     }
 
 
-portfolio = [
-    {"ticker": "TCS", "qty": 10},
-    {"ticker": "RELIANCE", "qty": 5},
-    {"ticker": "INFY", "qty": 15},
-]
+MARKET_LABELS = {"IN": "India (NSE)", "US": "United States"}
+CURRENCY = {"IN": "INR", "US": "USD"}
+
+# Mocked demo portfolios; Kite Connect integration deferred.
+PORTFOLIOS = {
+    "IN": [{"ticker": "TCS", "qty": 10}, {"ticker": "RELIANCE", "qty": 5}, {"ticker": "INFY", "qty": 15}],
+    "US": [{"ticker": "AAPL", "qty": 10}, {"ticker": "MSFT", "qty": 5}, {"ticker": "NVDA", "qty": 15}],
+}
+
+
+def normalize_market(market: str) -> str:
+    m = market.upper()
+    if m not in MARKET_LABELS:
+        raise typer.BadParameter("market must be IN or US")
+    return m
+
+
+def get_exposure(market: str = "IN") -> dict:
+    """Weights, values and correlation for the mocked portfolio of a market."""
+    holdings_list = PORTFOLIOS[market]
+    symbols = [resolve_ticker(h["ticker"], market) for h in holdings_list]
+    data = yf.download(symbols, period="6mo")["Close"]
+    missing = [s for s in symbols if s not in data.columns or data[s].isna().all()]
+    if missing:
+        return{"error": f"No price data for: {', '.join(missing)}"}
+    latest_prices = data.iloc[-1]
+
+    values = {h["ticker"]: float(latest_prices[s]) * h["qty"] for h, s in zip(holdings_list, symbols)}
+    total_value = sum(values.values())
+
+    return {
+        "market": market,
+        "currency": CURRENCY[market],
+        "holdings_value": {t: round(v, 2) for t, v in values.items()},
+        "weights_pct": {t: round(v / total_value * 100, 1) for t, v in values.items()},
+        "total_value": round(total_value, 2),
+        "correlation_matrix": data.pct_change().dropna().corr().round(2).to_dict(),
+    }
 
 # [CHANGE 1] Single shared system prompt + tool-round cap
 SYSTEM_PROMPT = (
@@ -78,6 +117,10 @@ SYSTEM_PROMPT = (
     "claims unless a tool explicitly returned them — even when reasoning about a number a tool did return."
 )
 MAX_ROUNDS = 6
+
+
+def system_prompt_for(market: str) -> str:
+    return SYSTEM_PROMPT + f" The market for this session is {MARKET_LABELS[market]}; tickers are resolved for that market."
 
 tools = [
     {
@@ -126,7 +169,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_exposure",
-            "description": "Get portfolio weight breakdown and correlation matrix across holdings",
+            "description": "Get weight breakdown and correlation matrix for the mocked demo portfolio in the current market",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -171,28 +214,7 @@ def run_tool(name, args):
     elif name == "get_var":
         return compute_live_var(args["ticker"], current_market)
     elif name == "get_exposure":
-        tickers_ns = [f"{h['ticker']}.NS" for h in portfolio]
-        data = yf.download(tickers_ns, period="6mo")["Close"]
-        latest_prices = data.iloc[-1]
-
-        total_value = 0
-        holdings = {}
-        for h in portfolio:
-            ticker_ns = f"{h['ticker']}.NS"
-            price = latest_prices[ticker_ns]
-            value = price * h["qty"]
-            holdings[h["ticker"]] = round(value, 2)
-            total_value += value
-
-        weights = {t: round((v / total_value) * 100, 1) for t, v in holdings.items()}
-        correlation = data.pct_change().dropna().corr().round(2).to_dict()
-
-        return {
-            "holdings_value": holdings,
-            "weights_pct": weights,
-            "total_value": round(total_value, 2),
-            "correlation_matrix": correlation
-        }
+        return get_exposure(current_market)
     return {"error": "Unknown tool"}
 
 
@@ -237,7 +259,7 @@ def chat():
     print(f"Market set to {'United States' if current_market == 'US' else 'India (NSE)'}.\n")
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}  # [CHANGE 1]
+        {"role": "system", "content": system_prompt_for(current_market)}
     ]
     print("Chat session started. Type 'exit' to quit.\n")
 
@@ -277,10 +299,12 @@ def chat():
 
 
 @app.command()
-def ask(query: str):
-    """Ask the AI analyst a question. Defaults to India (NSE) — use chat() for US market questions."""
+def ask(query: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
+    """Ask the AI analyst a one-shot question."""
+    global current_market
+    current_market = normalize_market(market)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},  # [CHANGE 1] ask() now gets the full prompt
+        {"role": "system", "content": system_prompt_for(current_market)},
         {"role": "user", "content": query}
     ]
 
@@ -312,32 +336,19 @@ def ask(query: str):
 
 
 @app.command()
-def exposure():
-    """Show portfolio exposure and concentration risk"""
-    tickers_ns = [f"{h['ticker']}.NS" for h in portfolio]
-    data = yf.download(tickers_ns, period="6mo")["Close"]
-    latest_prices = data.iloc[-1]
-
-    total_value = 0
-    holdings_value = {}
-    for h in portfolio:
-        ticker_ns = f"{h['ticker']}.NS"
-        price = latest_prices[ticker_ns]
-        value = price * h["qty"]
-        holdings_value[h["ticker"]] = value
-        total_value += value
-
-    print("Portfolio Exposure:")
-    for ticker, value in holdings_value.items():
-        weight = (value / total_value) * 100
-        print(f"  {ticker}: ₹{value:,.2f}  ({weight:.1f}% of portfolio)")
-
-    print(f"\nTotal Portfolio Value: ₹{total_value:,.2f}")
-
-    returns = data.pct_change().dropna()
-    correlation = returns.corr()
+def exposure(market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
+    """Show exposure and concentration risk for the mocked demo portfolio"""
+    result = get_exposure(normalize_market(market))
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        return
+    cur = result["currency"]
+    print(f"Portfolio Exposure ({MARKET_LABELS[result['market']]}, mocked):")
+    for ticker, value in result["holdings_value"].items():
+        print(f"  {ticker}: {cur} {value:,.2f}  ({result['weights_pct'][ticker]:.1f}% of portfolio)")
+    print(f"\nTotal Portfolio Value: {cur} {result['total_value']:,.2f}")
     print("\nCorrelation Matrix:")
-    print(correlation.round(2))
+    print(pd.DataFrame(result["correlation_matrix"]))
 
 
 @app.command()
