@@ -1,3 +1,6 @@
 typer
 python-dotenv
 yfinance
+groq
+numpy
+pytest
