@@ -85,6 +85,8 @@ def normalize_market(market: str) -> str:
         raise typer.BadParameter("market must be IN or US")
     return m
 
+STALE_MAX_ROWS = 3 # max trading days a holding;s last valid price may lag the porfolio's newest row
+
 
 def get_exposure(market: str = "IN") -> dict:
     """Weights, values and correlation for the mocked portfolio of a market."""
@@ -94,14 +96,25 @@ def get_exposure(market: str = "IN") -> dict:
     missing = [s for s in symbols if s not in data.columns or data[s].isna().all()]
     if missing:
         return{"error": f"No price data for: {', '.join(missing)}"}
-    latest_prices = data.iloc[-1]
+    latest_prices, stale, too_old = {}, [], []
+    for h, s in zip(holdings_list, symbols):
+        last_valid = data[s].last_valid_index()
+        lag = len(data) - 1 - data.index.get_loc(last_valid)
+        if lag > STALE_MAX_ROWS:
+            too_old.append(h["ticker"])
+        elif lag > 0:
+            stale.append({"ticker": h["ticker"], "as_of": str(last_valid.date())})
+        latest_prices[s] = float(data[s].loc[last_valid])
+    if too_old:
+        return{"error": f"Price data older than {STALE_MAX_ROWS} trading days for: {', '.join(too_old)}"}
 
-    values = {h["ticker"]: float(latest_prices[s]) * h["qty"] for h, s in zip(holdings_list, symbols)}
+    values = {h["ticker"]: latest_prices[s] * h["qty"] for h, s in zip(holdings_list, symbols)}
     total_value = sum(values.values())
 
     return {
         "market": market,
         "currency": CURRENCY[market],
+        "stale": stale,
         "holdings_value": {t: round(v, 2) for t, v in values.items()},
         "weights_pct": {t: round(v / total_value * 100, 1) for t, v in values.items()},
         "total_value": round(total_value, 2),
@@ -114,8 +127,9 @@ SYSTEM_PROMPT = (
     "Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) "
     "that wasn't explicitly returned by a tool. If asked for something not covered by your tools, "
     "say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' "
-    "claims unless a tool explicitly returned them — even when reasoning about a number a tool did return."
-)
+    "claims unless a tool explicitly returned them - even when reasoning about a number a tool did return."
+    "If a tool result lists stale holdings, say which ones and their as_of dates."
+    )
 MAX_ROUNDS = 6
 
 
@@ -346,6 +360,8 @@ def exposure(market: str = typer.Option("IN", help="IN for India (NSE) or US for
     print(f"Portfolio Exposure ({MARKET_LABELS[result['market']]}, mocked):")
     for ticker, value in result["holdings_value"].items():
         print(f"  {ticker}: {cur} {value:,.2f}  ({result['weights_pct'][ticker]:.1f}% of portfolio)")
+    for s in result["stale"]:
+        print(f" Warning: {s['ticker']} priced as of {s['as_of']} (latest price missing)")
     print(f"\nTotal Portfolio Value: {cur} {result['total_value']:,.2f}")
     print("\nCorrelation Matrix:")
     print(pd.DataFrame(result["correlation_matrix"]))

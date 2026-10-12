@@ -257,3 +257,43 @@ def test_get_exposure_reports_failed_download(monkeypatch):
 
     monkeypatch.setattr(app.yf, "download", fake_download)
     assert app.get_exposure("US") == {"error": "No price data for: MSFT"}
+
+def test_get_exposure_falls_back_to_last_valid_price_and_flags_stale(monkeypatch):
+    frames = {}
+
+    def fake_download(tickers, period=None):
+        frame = make_close_frame(tickers)
+        frame.loc[frame.index[-1], "MSFT"] = np.nan
+        frames["f"] = frame
+        return {"Close": frame}
+
+    monkeypatch.setattr(app.yf, "download", fake_download)
+    result = app.get_exposure("US")
+    frame = frames["f"]
+
+    assert "error" not in result, result
+    assert result["stale"] == [{"ticker": "MSFT", "as_of": str(frame.index[-2].date())}]
+    assert result["holdings_value"]["MSFT"] == round(float(frame["MSFT"].iloc[-2]) * 5, 2)
+    assert np.isfinite(result["total_value"])
+
+
+@pytest.mark.parametrize("nan_rows, expect_error", [(3, False), (4, True)])
+def test_get_exposure_stale_cutoff_boundary(monkeypatch, nan_rows, expect_error):
+    def fake_download(tickers, period=None):
+        frame = make_close_frame(tickers)
+        frame.iloc[-nan_rows:, frame.columns.get_loc("MSFT")] = np.nan
+        return {"Close": frame}
+
+    monkeypatch.setattr(app.yf, "download", fake_download)
+    result = app.get_exposure("US")
+
+    if expect_error:
+        assert result == {"error": f"Price data older than {app.STALE_MAX_ROWS} trading days for: MSFT"}
+    else:
+        assert "error" not in result, result
+        assert [s["ticker"] for s in result["stale"]] == ["MSFT"]
+
+
+def test_get_exposure_fresh_data_has_empty_stale_list(monkeypatch):
+    monkeypatch.setattr(app.yf, "download", fake_download_recorder([]))
+    assert app.get_exposure("US")["stale"] == []
