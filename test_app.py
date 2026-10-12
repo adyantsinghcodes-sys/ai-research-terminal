@@ -161,6 +161,105 @@ def test_get_fundamentals_missing_fields_are_none_and_zero_is_kept(monkeypatch):
     assert zero["de_ratio"] is not None and zero["de_ratio"] == 0
 
 
+    assert zero["de_ratio"] is not None and zero["de_ratio"] == 0
+
+
+# ---------- quote / fundamentals characterization (pins behaviour before the dedupe) ----------
+
+def make_closes(*closes):
+    index = pd.date_range("2025-01-01", periods=len(closes), freq="B")
+    return pd.DataFrame({"Close": list(closes)}, index=index)
+
+
+def test_quote_cli_output_format(monkeypatch):
+    requested = []
+
+    def fake_ticker(symbol):
+        requested.append(symbol)
+        return FakeTicker(symbol, make_closes(100.0, 102.5))
+
+    monkeypatch.setattr(app.yf, "Ticker", fake_ticker)
+    result = CliRunner().invoke(app.app, ["quote", "tcs"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert requested == ["TCS.NS"]
+    assert result.output.strip() == "TCS: 102.50  (+2.50, +2.50%)"
+
+
+def test_quote_cli_us_market_uses_bare_ticker(monkeypatch):
+    requested = []
+
+    def fake_ticker(symbol):
+        requested.append(symbol)
+        return FakeTicker(symbol, make_closes(100.0, 102.5))
+
+    monkeypatch.setattr(app.yf, "Ticker", fake_ticker)
+    result = CliRunner().invoke(app.app, ["quote", "aapl", "--market", "US"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert requested == ["AAPL"]
+    assert result.output.strip().startswith("AAPL:")
+
+
+@pytest.mark.parametrize("closes", [(), (100.0,)])
+def test_quote_cli_not_enough_data(monkeypatch, closes):
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, make_closes(*closes)))
+    result = CliRunner().invoke(app.app, ["quote", "tcs"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert result.output.strip() == "No data found for TCS"
+
+
+def test_get_quote_tool_result(monkeypatch):
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, make_closes(100.0, 102.5)))
+    assert app.run_tool("get_quote", {"ticker": "tcs"}) == {
+        "ticker": "TCS", "price": 102.5, "change": 2.5, "pct_change": 2.5,
+    }
+
+
+def test_get_quote_tool_not_enough_data(monkeypatch):
+    # Tool wording differs from the CLI's "No data found for X"; the dedupe has to decide.
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, make_closes(100.0)))
+    assert app.run_tool("get_quote", {"ticker": "tcs"}) == {"error": "Not enough data found"}
+
+
+def test_fundamentals_cli_output_format(monkeypatch):
+    info = {"returnOnEquity": 0.085, "debtToEquity": 46.28, "trailingPE": 25.0, "marketCap": 1_000_000}
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, info=info))
+    result = CliRunner().invoke(app.app, ["fundamentals", "tcs"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert result.output.strip().splitlines() == [
+        "TCS Fundamentals:",
+        "  P/E Ratio: 25.00",
+        "  Market Cap: 1,000,000",
+        "  ROE: 8.50%",
+        "  D/E: 0.46",
+    ]
+
+
+def test_fundamentals_cli_no_pe_means_no_data(monkeypatch):
+    # CLI treats a missing P/E as "no data" even when other fields exist.
+    # run_tool returns the dict with pe=None instead. This divergence is the
+    # decision the dedupe has to make.
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, info={"marketCap": 1_000_000}))
+    result = CliRunner().invoke(app.app, ["fundamentals", "tcs"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert result.output.strip() == "No fundamentals data found for TCS"
+
+
+def test_fundamentals_cli_missing_optional_fields_print_na(monkeypatch):
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, info={"trailingPE": 25.0}))
+    result = CliRunner().invoke(app.app, ["fundamentals", "tcs"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    for line in ("  Market Cap: N/A", "  ROE: N/A", "  D/E: N/A"):
+        assert line in result.output
+
+ 
+ 
+
 # ---------- var CLI ----------
 
 def test_var_cli_reads_compute_live_var_keys(monkeypatch):
