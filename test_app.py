@@ -187,6 +187,23 @@ def test_var_cli_reads_compute_live_var_keys(monkeypatch):
     assert "Test interpretation." in result.output
 
 
+def test_var_cli_end_to_end_with_real_compute_live_var(monkeypatch):
+    # No fake result: the CLI reads whatever compute_live_var really returns,
+    # so a key renamed on either side fails here with a KeyError.
+    monkeypatch.setattr(app.yf, "Ticker", lambda s: FakeTicker(s, make_history()))
+    expected = app.compute_live_var("tcs", "IN")
+
+    result = CliRunner().invoke(app.app, ["var", "tcs"])
+
+    assert result.exception is None, repr(result.exception)
+    assert result.exit_code == 0
+    assert "TCS" in result.output
+    assert f"{expected['var_1day_pct']}%" in result.output
+    assert f"Adapted alpha: {expected['adapted_alpha']}" in result.output
+    assert expected["interpretation"] in result.output
+ 
+
+
 # ---------- get_exposure ----------
 
 def make_close_frame(symbols, rows=130, seed=1):
