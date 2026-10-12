@@ -136,13 +136,27 @@ def fetch_quote(ticker: str, market: str = "IN") -> dict:
     }
 
 
+def fetch_fundamentals(ticker: str, market: str = "IN") -> dict:
+    """P/E, market cap, ROE (percent) and D/E (ratio); shared by the fundamentals CLI and the tool."""
+    info = yf.Ticker(resolve_ticker(ticker, market)).info or {}
+    roe = info.get("returnOnEquity")
+    de = info.get("debtToEquity")
+    return {
+        "ticker": ticker.upper(),
+        "pe": info.get("trailingPE"),
+        "market_cap": info.get("marketCap"),
+        "roe_pct": round(roe * 100, 2) if roe is not None else None,
+        "de_ratio": round(de / 100, 2) if de is not None else None,
+    }
+
+
 # [CHANGE 1] Single shared system prompt + tool-round cap
 SYSTEM_PROMPT = (
     "You are a financial data assistant. Only state numbers that come from tool results. "
     "Never estimate, infer, or state a figure (volatility, beta, historical loss, ratios, etc) "
     "that wasn't explicitly returned by a tool. If asked for something not covered by your tools, "
     "say so clearly. Do not introduce comparative statistics, industry benchmarks, or 'typical range' "
-    "claims unless a tool explicitly returned them - even when reasoning about a number a tool did return."
+    "claims unless a tool explicitly returned them - even when reasoning about a number a tool did return. "
     "If a tool result lists stale holdings, say which ones and their as_of dates."
     )
 MAX_ROUNDS = 6
@@ -216,18 +230,7 @@ def run_tool(name, args):
     if name == "get_quote":
         return fetch_quote(args["ticker"], current_market)
     elif name == "get_fundamentals":
-        display_ticker = args["ticker"].upper()
-        t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
-        info = t.info
-        roe = info.get("returnOnEquity")
-        de = info.get("debtToEquity")
-        return {
-            "ticker": display_ticker,
-            "pe": info.get("trailingPE"),
-            "market_cap": info.get("marketCap"),
-            "roe_pct": round(roe * 100, 2) if roe is not None else None,
-            "de_ratio": round(de/100 ,2) if de is not None else None
-        }
+        return fetch_fundamentals(args["ticker"], current_market)
     elif name == "get_var":
         return compute_live_var(args["ticker"], current_market)
     elif name == "get_exposure":
@@ -363,24 +366,22 @@ def exposure(market: str = typer.Option("IN", help="IN for India (NSE) or US for
 @app.command()
 def fundamentals(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get fundamentals for a ticker"""
-    display_ticker = ticker.upper()
-    t = yf.Ticker(resolve_ticker(ticker, market))
-    info = t.info
+    result = fetch_fundamentals(ticker, market)
 
-    if not info or info.get("trailingPE") is None:
-        print(f"No fundamentals data found for {display_ticker}")
+    if result["pe"] is None:
+        print(f"No fundamentals data found for {result['ticker']}")
         return
 
-    pe = info.get("trailingPE")
-    market_cap = info.get("marketCap")
-    roe = info.get("returnOnEquity")
-    de = info.get("debtToEquity")
+    pe = result["pe"]
+    market_cap = result["market_cap"]
+    roe = result["roe_pct"]
+    de = result["de_ratio"]
 
-    print(f"{display_ticker} Fundamentals:")
-    print(f"  P/E Ratio: {pe:.2f}" if pe is not None else "  P/E Ratio: N/A")
+    print(f"{result['ticker']} Fundamentals:")
+    print(f"  P/E Ratio: {pe:.2f}")
     print(f"  Market Cap: {market_cap:,}" if market_cap is not None else "  Market Cap: N/A")
-    print(f"  ROE: {roe*100:.2f}%" if roe is not None else "  ROE: N/A")
-    print(f"  D/E: {de/100:.2f}" if de is not None else "  D/E: N/A")
+    print(f"  ROE: {roe:.2f}%" if roe is not None else "  ROE: N/A")
+    print(f"  D/E: {de:.2f}" if de is not None else "  D/E: N/A")
 
 
 @app.command()
