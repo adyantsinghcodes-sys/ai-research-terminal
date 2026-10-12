@@ -121,6 +121,21 @@ def get_exposure(market: str = "IN") -> dict:
         "correlation_matrix": data.pct_change().dropna().corr().round(2).to_dict(),
     }
 
+def fetch_quote(ticker: str, market: str = "IN") -> dict:
+    """Latest price and day change; shared by the quote CLI and the get_quote tool."""
+    data = yf.Ticker(resolve_ticker(ticker, market)).history(period="5d")
+    if data.empty or len(data) < 2:
+        return {"error": "Not enough data found"}
+    latest = data["Close"].iloc[-1]
+    previous = data["Close"].iloc[-2]
+    return {
+        "ticker": ticker.upper(),
+        "price": round(latest, 2),
+        "change": round(latest - previous, 2),
+        "pct_change": round((latest - previous) / previous * 100, 2),
+    }
+
+
 # [CHANGE 1] Single shared system prompt + tool-round cap
 SYSTEM_PROMPT = (
     "You are a financial data assistant. Only state numbers that come from tool results. "
@@ -199,19 +214,7 @@ def run_tool(name, args):
     Uses the module-level current_market, set by chat() at session start
     (defaults to India for ask(), which has no market prompt)."""
     if name == "get_quote":
-        display_ticker = args["ticker"].upper()
-        t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
-        data = t.history(period="5d")
-        if data.empty or len(data) < 2:
-            return {"error": "Not enough data found"}
-        latest = data["Close"].iloc[-1]
-        previous = data["Close"].iloc[-2]
-        return {
-            "ticker": display_ticker,
-            "price": round(latest, 2),
-            "change": round(latest - previous, 2),
-            "pct_change": round((latest - previous) / previous * 100, 2)
-        }
+        return fetch_quote(args["ticker"], current_market)
     elif name == "get_fundamentals":
         display_ticker = args["ticker"].upper()
         t = yf.Ticker(resolve_ticker(args["ticker"], current_market))
@@ -244,21 +247,11 @@ def safe_run_tool(name, args_json):
 @app.command()
 def quote(ticker: str, market: str = typer.Option("IN", help="IN for India (NSE) or US for United States")):
     """Get quote for a ticker"""
-    display_ticker = ticker.upper()
-    t = yf.Ticker(resolve_ticker(ticker, market))
-    data = t.history(period="5d")
-
-    if data.empty or len(data) < 2:
-        print(f"No data found for {display_ticker}")
+    result = fetch_quote(ticker, (market))
+    if "error" in result:
+        print(f"No data found for {ticker.upper()}")
         return
-
-    latest = data["Close"].iloc[-1]
-    previous = data["Close"].iloc[-2]
-    change = latest - previous
-    pct_change = (change / previous) * 100
-
-    print(f"{display_ticker}: {latest:.2f}  ({change:+.2f}, {pct_change:+.2f}%)")
-
+    print(f"{result['ticker']}: {result['price']:.2f}  ({result['change']:+.2f}, {result['pct_change']:+.2f}%)")
 
 @app.command()
 def chat():
